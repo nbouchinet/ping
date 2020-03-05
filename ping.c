@@ -64,14 +64,15 @@ struct addrinfo	*get_destination(const char *src)
 	struct	addrinfo *res;
 	struct	addrinfo hints;
 
+	res = NULL;
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_DGRAM;
-	getaddrinfo(src, 0, &hints, &res);
 
-	inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, data.stats.addr, INET_ADDRSTRLEN);
-	printf("PING %s (%s) %i(%i) bytes of data.\n", src, data.stats.addr, PACKET_SIZE, PACKET_SIZE + IP_HEADER_SIZE + ECHO_REQUEST_SIZE);
-
+	if (!getaddrinfo(src, 0, &hints, &res)) {
+		inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, data.stats.addr, INET_ADDRSTRLEN);
+		printf("PING %s (%s) %i(%i) bytes of data.\n", src, data.stats.addr, PACKET_SIZE, PACKET_SIZE + IP_HEADER_SIZE + ECHO_REQUEST_SIZE);
+	}
 	return res;
 }
 
@@ -104,7 +105,6 @@ int				get_ttl(struct msghdr recv_msg)
 	int ttl = -1;
 	struct cmsghdr * cmsg = CMSG_FIRSTHDR(&recv_msg); 
 
-	data.stats.recv_packets++;
 	for (; cmsg; cmsg = CMSG_NXTHDR(&recv_msg, cmsg)) {
 		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TTL) {
 			uint8_t * ttlPtr = (uint8_t *)CMSG_DATA(cmsg);
@@ -156,25 +156,32 @@ void			set_socket(struct addrinfo *ainfo)
 	}
 }
 
-void			do_ping()
+void			send_msg()
+{
+	gettimeofday(&data.send_hdr.time, NULL);
+	data.send_hdr.icmp_hdr.un.echo.sequence++;
+	if (sendto(data.sock, &data.send_hdr, sizeof(data.send_hdr), 0, (struct sockaddr*)data.src_addr, sizeof(*data.src_addr)) < 0) {
+		perror("ping: sendto");
+		data.stats.tran_packets++;
+		alarm(1);
+		return ;
+	}
+	data.stats.tran_packets++;
+	alarm(1);
+}
+
+void			recv_msg()
 {
 	int				ret = 0;
 	double			time;
 	struct timeval	recv_time;
 
-	gettimeofday(&data.send_hdr.time, NULL);
-	data.send_hdr.icmp_hdr.un.echo.sequence++;
-	if (sendto(data.sock, &data.send_hdr, sizeof(data.send_hdr), 0, (struct sockaddr*)data.src_addr, sizeof(*data.src_addr)) < 0) {
-		perror("sendto");
-		data.stats.tran_packets++;
-		return ;
-	}
-	data.stats.tran_packets++;
 	ret = recvmsg(data.sock, &data.recv_msg, MSG_WAITALL|MSG_TRUNC);
 	gettimeofday(&recv_time, NULL);
 	if (ret < 0) {
 		//TODO: do something i don't know what
 	} else {
+		data.stats.recv_packets++;
 		if (data.recv_hdr.icmp_hdr.type == 0) {
 			char			paddr[INET_ADDRSTRLEN];
 			int				ttl;
@@ -198,14 +205,13 @@ void			int_handler(int signal)
 	printf("\n--- %s ping statistics ---\n", data.stats.addr);
 	printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, time);
 
-	printf("rtt min/avg/max/mdev = 4.003/56.357/417.414/136.468 ms\n");
+	printf("rtt min/avg/max/mdev = 4.003/56.357/417.414/136.468 ms\n");//TODO: impl
 	exit(EXIT_SUCCESS);
 }
 
 void			alrm_handler(int signal)
 {
-	do_ping();
-	alarm(1);
+	send_msg();
 }
 
 int				main(int argc, const char *argv[])
@@ -215,19 +221,21 @@ int				main(int argc, const char *argv[])
 	signal(SIGINT, int_handler);
 	signal(SIGALRM, alrm_handler);
 
-	if (check_user()) {
-		printf("User is not root!\n");
-		exit(EXIT_FAILURE);
-	}
 	if (argc > 2 || argc < 1) {
 		printf("Usage: ping {destination}\n");
 		exit(EXIT_FAILURE);
 	}
 	gettimeofday(&data.stats.start_time, NULL);
 	ainfo = get_destination(argv[1]);
+	if (ainfo == NULL) {
+		printf("ping: %s: Name or service not known\n", argv[1]);
+		exit(EXIT_FAILURE);
+	}
 	set_socket(ainfo);
-	alarm(1);
-	while (1);
+	send_msg();
+	while (1) {
+		recv_msg();
+	}
 	freeaddrinfo(ainfo);
 	return 0;
 }
