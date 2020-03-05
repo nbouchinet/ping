@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <math.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -32,6 +33,7 @@ typedef struct		s_statistics
 	double			rtt_mdev;
 	double			rtt_min;
 	double			rtt_total;
+	double			rtt_sqrsum;
 	struct timeval	start_time;
 	struct timeval	stop_time;
 	int				tran_packets;
@@ -185,6 +187,7 @@ void			send_packet()
 void			set_rtt(double time)
 {
 	data.stats.rtt_total += time;
+	data.stats.rtt_sqrsum += time * time;
 	if (time < data.stats.rtt_min || data.stats.rtt_min == 0) {
 		data.stats.rtt_min = time;
 	}
@@ -221,11 +224,22 @@ void			recv_packet()
 	}
 }
 
+double			get_mdev()
+{
+	double mdev;
+	double avgsqr;
+
+	avgsqr = data.stats.rtt_avg * data.stats.rtt_avg;
+	mdev = (1. / data.stats.tran_packets) * data.stats.rtt_sqrsum - avgsqr;
+	return sqrt(mdev);
+}
+
 void			int_handler(int signal)
 {
 	float	time;
 
 	data.stats.rtt_avg = data.stats.rtt_total / data.stats.tran_packets;
+	data.stats.rtt_mdev = get_mdev();
 	printf("\n--- %s ping statistics ---\n", data.stats.addr);
 	printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, data.stats.time);
 	printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n", data.stats.rtt_min, data.stats.rtt_avg, data.stats.rtt_max, data.stats.rtt_mdev);
