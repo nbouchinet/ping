@@ -27,10 +27,11 @@ typedef struct		s_statistics
 	char			addr[INET_ADDRSTRLEN];
 	double			time;
 	int				recv_packets;
-	int				rtt_avg;
-	int				rtt_max;
-	int				rtt_mdev;
-	int				rtt_min;
+	double			rtt_avg;
+	double			rtt_max;
+	double			rtt_mdev;
+	double			rtt_min;
+	double			rtt_total;
 	struct timeval	start_time;
 	struct timeval	stop_time;
 	int				tran_packets;
@@ -181,14 +182,25 @@ void			send_packet()
 	alarm(1);
 }
 
+void			set_rtt(double time)
+{
+	data.stats.rtt_total += time;
+	if (time < data.stats.rtt_min || data.stats.rtt_min == 0) {
+		data.stats.rtt_min = time;
+	}
+	if (time > data.stats.rtt_max) {
+		data.stats.rtt_max = time;
+	}
+}
+
 void			recv_packet()
 {
 	int				ret = 0;
 	double			time;
 	struct timeval	recv_time;
 
-	ret = recvmsg(data.sock, &data.recv_msg, MSG_WAITALL|MSG_TRUNC);
 	gettimeofday(&data.stats.start_time, NULL);
+	ret = recvmsg(data.sock, &data.recv_msg, MSG_WAITALL|MSG_TRUNC);
 	gettimeofday(&recv_time, NULL);
 	if (ret < 0) {
 		//TODO: do something i don't know what
@@ -201,6 +213,7 @@ void			recv_packet()
 
 			ttl = get_ttl(data.recv_msg);
 			inet_ntop(AF_INET, &data.src_addr->sin_addr, paddr, INET_ADDRSTRLEN);
+			set_rtt(time);
 			printf("%i bytes from %s: icmp_seq=%i ttl=%i time=%.3f ms\n", ret, paddr, data.recv_hdr.icmp_hdr.un.echo.sequence, ttl, time);
 		} else {
 			printf("Type: %i\n", data.recv_hdr.icmp_hdr.type);
@@ -212,9 +225,10 @@ void			int_handler(int signal)
 {
 	float	time;
 
-	//	time = get_time(data.stats.start_time, data.stats.stop_time);
+	data.stats.rtt_avg = data.stats.rtt_total / data.stats.tran_packets;
 	printf("\n--- %s ping statistics ---\n", data.stats.addr);
 	printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, data.stats.time);
+	printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n", data.stats.rtt_min, data.stats.rtt_avg, data.stats.rtt_max, data.stats.rtt_mdev);
 	exit(EXIT_SUCCESS);
 }
 
