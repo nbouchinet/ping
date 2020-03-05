@@ -25,6 +25,7 @@ typedef struct t_send_hdr
 typedef struct		s_statistics
 {
 	char			addr[INET_ADDRSTRLEN];
+	double			time;
 	int				recv_packets;
 	int				rtt_avg;
 	int				rtt_max;
@@ -156,8 +157,18 @@ void			set_socket(struct addrinfo *ainfo)
 	}
 }
 
-void			send_msg()
+void			send_packet()
 {
+	long double	time;
+
+	gettimeofday(&data.stats.stop_time, NULL);
+	if (data.stats.start_time.tv_usec == 0 && data.stats.start_time.tv_sec == 0) {
+		time = 0;
+	} else {
+		time = get_time(data.stats.start_time, data.stats.stop_time);
+		data.stats.time += time;
+	}
+
 	gettimeofday(&data.send_hdr.time, NULL);
 	data.send_hdr.icmp_hdr.un.echo.sequence++;
 	if (sendto(data.sock, &data.send_hdr, sizeof(data.send_hdr), 0, (struct sockaddr*)data.src_addr, sizeof(*data.src_addr)) < 0) {
@@ -170,25 +181,26 @@ void			send_msg()
 	alarm(1);
 }
 
-void			recv_msg()
+void			recv_packet()
 {
 	int				ret = 0;
 	double			time;
 	struct timeval	recv_time;
 
 	ret = recvmsg(data.sock, &data.recv_msg, MSG_WAITALL|MSG_TRUNC);
+	gettimeofday(&data.stats.start_time, NULL);
 	gettimeofday(&recv_time, NULL);
 	if (ret < 0) {
 		//TODO: do something i don't know what
 	} else {
 		data.stats.recv_packets++;
+		time = get_time(data.send_hdr.time, recv_time);
 		if (data.recv_hdr.icmp_hdr.type == 0) {
 			char			paddr[INET_ADDRSTRLEN];
 			int				ttl;
 
 			ttl = get_ttl(data.recv_msg);
 			inet_ntop(AF_INET, &data.src_addr->sin_addr, paddr, INET_ADDRSTRLEN);
-			time = get_time(data.send_hdr.time, recv_time);
 			printf("%i bytes from %s: icmp_seq=%i ttl=%i time=%.3f ms\n", ret, paddr, data.recv_hdr.icmp_hdr.un.echo.sequence, ttl, time);
 		} else {
 			printf("Type: %i\n", data.recv_hdr.icmp_hdr.type);
@@ -200,18 +212,15 @@ void			int_handler(int signal)
 {
 	float	time;
 
-	gettimeofday(&data.stats.stop_time, NULL);
-	time = get_time(data.stats.start_time, data.stats.stop_time);
+	//	time = get_time(data.stats.start_time, data.stats.stop_time);
 	printf("\n--- %s ping statistics ---\n", data.stats.addr);
-	printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, time);
-
-	printf("rtt min/avg/max/mdev = 4.003/56.357/417.414/136.468 ms\n");//TODO: impl
+	printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, data.stats.time);
 	exit(EXIT_SUCCESS);
 }
 
 void			alrm_handler(int signal)
 {
-	send_msg();
+	send_packet();
 }
 
 int				main(int argc, const char *argv[])
@@ -225,16 +234,15 @@ int				main(int argc, const char *argv[])
 		printf("Usage: ping {destination}\n");
 		exit(EXIT_FAILURE);
 	}
-	gettimeofday(&data.stats.start_time, NULL);
 	ainfo = get_destination(argv[1]);
 	if (ainfo == NULL) {
 		printf("ping: %s: Name or service not known\n", argv[1]);
 		exit(EXIT_FAILURE);
 	}
 	set_socket(ainfo);
-	send_msg();
+	send_packet();
 	while (1) {
-		recv_msg();
+		recv_packet();
 	}
 	freeaddrinfo(ainfo);
 	return 0;
