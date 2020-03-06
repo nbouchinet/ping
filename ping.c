@@ -2,6 +2,7 @@
 #include <linux/errqueue.h>
 #include <math.h>
 #include <netdb.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
@@ -131,8 +132,11 @@ int				get_ttl(struct msghdr recv_msg)
 void			print_error(int type, int code)
 {
 	char	paddr[INET_ADDRSTRLEN];
+	char	host[NI_MAXHOST];
 
 	inet_ntop(AF_INET, &data.src_addr->sin_addr, paddr, INET_ADDRSTRLEN);
+	getnameinfo((struct sockaddr*)data.src_addr, sizeof(data.src_addr), host, NI_MAXHOST, NULL, 0, NI_NUMERICSERV|NI_NOFQDN|NI_DGRAM);
+	printf("%s\n", host);
 	printf("From %s icmp_seq=%u ", paddr, data.send_hdr.icmp_hdr.un.echo.sequence);
 	switch (type) {
 		case ICMP_TIME_EXCEEDED:
