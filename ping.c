@@ -1,10 +1,11 @@
-#include <signal.h>
-#include <math.h>
 #include <arpa/inet.h>
+#include <linux/errqueue.h>
+#include <math.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,7 @@ typedef struct t_send_hdr
 
 typedef struct		s_statistics
 {
+	int				errors;
 	char			addr[INET_ADDRSTRLEN];
 	double			time;
 	int				recv_packets;
@@ -47,6 +49,7 @@ typedef struct	s_data
 	struct iovec		recv_vec;
 	struct sockaddr_in	*src_addr;
 	int					sock;
+	int					id;
 
 	struct s_statistics stats;
 }				t_data;
@@ -88,7 +91,8 @@ struct t_send_hdr	get_dgram(struct addrinfo *ainfo)
 	addr = (struct sockaddr_in*)ainfo->ai_addr;
 	memset(&send_hdr.icmp_hdr, 0, sizeof(send_hdr.icmp_hdr));
 	send_hdr.icmp_hdr.type = ICMP_ECHO;
-	send_hdr.icmp_hdr.un.echo.id = 1243;
+	send_hdr.icmp_hdr.un.echo.id = getpid();
+	data.id = send_hdr.icmp_hdr.un.echo.id;
 	send_hdr.icmp_hdr.un.echo.sequence = 0;
 
 	return send_hdr;
@@ -96,33 +100,136 @@ struct t_send_hdr	get_dgram(struct addrinfo *ainfo)
 
 void			setsockopts(int sock)
 {
-	int					yes = 1;
-	int					ttl;
+	int		ttl;
+	int		yes;
 
-	ttl = IPDEFTTL;
+	ttl = 1;//IPDEFTTL;
+	yes = 1;
+	setsockopt(sock, IPPROTO_IP, IP_RECVERR, &yes, sizeof(yes));
 	setsockopt(sock, IPPROTO_IP, IP_RECVTTL, &yes, sizeof(yes));
 	setsockopt(sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
 }
 
 int				get_ttl(struct msghdr recv_msg)
 {
-	int ttl = -1;
-	struct cmsghdr * cmsg = CMSG_FIRSTHDR(&recv_msg); 
+	struct cmsghdr *cmsg;
+	int *ttlptr;
+	int received_ttl;
 
-	for (; cmsg; cmsg = CMSG_NXTHDR(&recv_msg, cmsg)) {
+	/* Receive auxiliary data in msgh */
+
+	for (cmsg = CMSG_FIRSTHDR(&recv_msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&recv_msg, cmsg)) {
 		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TTL) {
-			uint8_t * ttlPtr = (uint8_t *)CMSG_DATA(cmsg);
-			ttl = *ttlPtr;
+			ttlptr = (int *) CMSG_DATA(cmsg);
+			received_ttl = *ttlptr;
 			break;
 		}
 	}
-	return (ttl);
+	return (received_ttl);
+}
+
+void			print_error(int type, int code)
+{
+	char	paddr[INET_ADDRSTRLEN];
+
+	inet_ntop(AF_INET, &data.src_addr->sin_addr, paddr, INET_ADDRSTRLEN);
+	printf("From %s icmp_seq=%u ", paddr, data.send_hdr.icmp_hdr.un.echo.sequence);
+	switch (type) {
+		case ICMP_TIME_EXCEEDED:
+			switch (code) {
+				case ICMP_EXC_TTL:
+					printf("Time to live exceeded\n");
+					break ;
+				case ICMP_EXC_FRAGTIME:
+					printf("Frag reassembly time exceeded\n");
+					break;
+				default:
+					printf("Time exceeded, Bad Code: %d\n", code);
+					break;
+			}
+			break ;
+		case ICMP_DEST_UNREACH:
+			switch (code) {
+				case ICMP_NET_UNREACH:
+					printf("Destination Net Unreachable\n");
+					break;
+				case ICMP_HOST_UNREACH:
+					printf("Destination Host Unreachable\n");
+					break;
+				case ICMP_PROT_UNREACH:
+					printf("Destination Protocol Unreachable\n");
+					break;
+				case ICMP_PORT_UNREACH:
+					printf("Destination Port Unreachable\n");
+					break;
+//								case ICMP_FRAG_NEEDED:
+//									fprintf(stderr, "Frag needed and DF set (mtu = %u)\n", data.stats.);
+//									break;
+				case ICMP_SR_FAILED:
+					printf("Source Route Failed\n");
+					break;
+				case ICMP_NET_UNKNOWN:
+					printf("Destination Net Unknown\n");
+					break;
+				case ICMP_HOST_UNKNOWN:
+					printf("Destination Host Unknown\n");
+					break;
+				case ICMP_HOST_ISOLATED:
+					printf("Source Host Isolated\n");
+					break;
+				case ICMP_NET_ANO:
+					printf("Destination Net Prohibited\n");
+					break;
+				case ICMP_HOST_ANO:
+					printf("Destination Host Prohibited\n");
+					break;
+				case ICMP_NET_UNR_TOS:
+					printf("Destination Net Unreachable for Type of Service\n");
+					break;
+				case ICMP_HOST_UNR_TOS:
+					printf("Destination Host Unreachable for Type of Service\n");
+					break;
+				case ICMP_PKT_FILTERED:
+					printf("Packet filtered\n");
+					break;
+				case ICMP_PREC_VIOLATION:
+					printf("Precedence Violation\n");
+					break;
+				case ICMP_PREC_CUTOFF:
+					printf("Precedence Cutoff\n");
+					break;
+				default:
+					printf("Dest Unreachable, Bad Code: %d\n", code);
+					break;
+			}
+			break ;
+	}
+}
+
+int				handle_error(struct msghdr recv_msg)
+{
+	struct cmsghdr				*cmsg;
+	struct sockaddr				*sock;
+	struct sock_extended_err	*sock_err;
+
+	for (cmsg = CMSG_FIRSTHDR(&recv_msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&recv_msg, cmsg)) {
+		if (cmsg->cmsg_type == IP_RECVERR) {
+			sock_err = (struct sock_extended_err*)CMSG_DATA(cmsg); 
+			if (sock_err) {
+				if (sock_err->ee_origin == SO_EE_ORIGIN_ICMP) {
+					data.stats.errors++;
+					print_error(sock_err->ee_type, sock_err->ee_code);
+				}
+			}
+		}
+	}
+	return (0);
 }
 
 struct msghdr	set_recvmsg(struct iovec *recv_vec, struct t_send_hdr *recv_hdr, struct sockaddr_in *src_addr)
 {
 	struct msghdr		recv_msg;
-	uint8_t				ctrlDataBuffer[CMSG_SPACE(sizeof(uint8_t))];
+	uint8_t				ctrlDataBuffer[CMSG_SPACE(sizeof(uint8_t)) * 256];
 
 	recv_vec->iov_base = recv_hdr;
 	recv_vec->iov_len = sizeof(*recv_hdr);
@@ -203,10 +310,14 @@ void			recv_packet()
 	struct timeval	recv_time;
 
 	gettimeofday(&data.stats.start_time, NULL);
-	ret = recvmsg(data.sock, &data.recv_msg, MSG_WAITALL|MSG_TRUNC);
+	ret = recvmsg(data.sock, &data.recv_msg, MSG_WAITALL);
+	if (data.send_hdr.icmp_hdr.un.echo.id != data.id) {
+		return ;
+	}
 	gettimeofday(&recv_time, NULL);
 	if (ret < 0) {
-		//TODO: do something i don't know what
+		recvmsg(data.sock, &data.recv_msg, MSG_ERRQUEUE);
+		handle_error(data.recv_msg);
 	} else {
 		data.stats.recv_packets++;
 		time = get_time(data.send_hdr.time, recv_time);
@@ -218,8 +329,6 @@ void			recv_packet()
 			inet_ntop(AF_INET, &data.src_addr->sin_addr, paddr, INET_ADDRSTRLEN);
 			set_rtt(time);
 			printf("%i bytes from %s: icmp_seq=%i ttl=%i time=%.3f ms\n", ret, paddr, data.recv_hdr.icmp_hdr.un.echo.sequence, ttl, time);
-		} else {
-			printf("Type: %i\n", data.recv_hdr.icmp_hdr.type);
 		}
 	}
 }
@@ -241,8 +350,12 @@ void			int_handler(int signal)
 	data.stats.rtt_avg = data.stats.rtt_total / data.stats.tran_packets;
 	data.stats.rtt_mdev = get_mdev();
 	printf("\n--- %s ping statistics ---\n", data.stats.addr);
-	printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, data.stats.time);
-	printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n", data.stats.rtt_min, data.stats.rtt_avg, data.stats.rtt_max, data.stats.rtt_mdev);
+	if (data.stats.errors) {
+		printf("%i packets transmitted, %i received, +%i errors, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, data.stats.errors, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, data.stats.time);
+	} else {
+		printf("%i packets transmitted, %i received, %.0f%% packet loss, time %.3fms\n", data.stats.tran_packets, data.stats.recv_packets, (double)(data.stats.tran_packets - data.stats.recv_packets) / data.stats.tran_packets * 100, data.stats.time);
+		printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n", data.stats.rtt_min, data.stats.rtt_avg, data.stats.rtt_max, data.stats.rtt_mdev);
+	}
 	exit(EXIT_SUCCESS);
 }
 
